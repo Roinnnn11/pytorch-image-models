@@ -119,3 +119,11 @@ Testing notebook.ipynb
 /*.png
 /*.zip
 /*.tar.*
+/*.JPEG
+
+
+# mywork:不要保存的文件夹
+my_optim/data/
+my_optim/onnx/
+my_optim/engines/
+my_optim/results/
