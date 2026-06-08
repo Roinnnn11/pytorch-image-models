@@ -127,3 +127,7 @@ my_optim/data/
 my_optim/onnx/
 my_optim/engines/
 my_optim/results/
+my_optim_Trans/onnx/
+my_optim_Trans/data/
+my_optim_Trans/engines/
+my_optim_Trans/results/

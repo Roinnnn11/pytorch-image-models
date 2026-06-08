@@ -1,19 +1,23 @@
 """Stage 7: Final comparison report — FP32 vs Torch FP16 vs TRT FP16 vs TRT INT8.
 
+Model is selected via OPTIM_MODEL env var (default: resnet50).
+
 Reads the JSON results files from every stage and computes:
   - top1 / top5 accuracy drop vs FP32
   - latency and throughput at bs=1 and bs=64
   - speedup ratios relative to FP32
   - logits MSE and cosine similarity (FP32 vs each precision)
 
-Writes results/summary.json and prints a markdown table.
+Writes results/<model>/summary.json and prints a markdown table.
 """
 import json
+import os
 import sys
 from pathlib import Path
 
 import torch
 
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import common
 
@@ -77,7 +81,8 @@ def load_trt_infer(engine_path: str):
 
 
 def main():
-    # Load per-stage results.
+    print(f"model: {common.MODEL_NAME}")
+
     baseline = load("baseline")
     trt_fp16 = load("trt_fp16")
     trt_int8 = load("trt_int8")
@@ -107,14 +112,8 @@ def main():
             "speedup_bs64": fp32_lat64 / lat64 if lat64 else None,
         })
 
-    # FP32 baseline
-    add_row(
-        "FP32 (torch)",
-        fp32_top1, fp32_top5,
-        fp32_lat1, fp32_lat64, fp32_tput64,
-    )
+    add_row("FP32 (torch)", fp32_top1, fp32_top5, fp32_lat1, fp32_lat64, fp32_tput64)
 
-    # Torch FP16 (autocast)
     tf16 = baseline.get("torch_fp16", {})
     if tf16:
         add_row(
@@ -125,7 +124,6 @@ def main():
             baseline["latency"]["fp16_bs64"]["throughput_img_s"],
         )
 
-    # TRT FP16
     if trt_fp16:
         add_row(
             "TRT FP16",
@@ -135,7 +133,6 @@ def main():
             trt_fp16["latency"]["bs64"]["throughput_img_s"],
         )
 
-    # TRT INT8
     if trt_int8:
         add_row(
             "TRT INT8 (PTQ)",
@@ -145,23 +142,24 @@ def main():
             trt_int8["latency"]["bs64"]["throughput_img_s"],
         )
 
-    # Compute logit similarity (FP32 vs TRT FP16/INT8) on 10 batches.
     print("computing logit similarity (FP32 vs TRT FP16/INT8, 10 batches)...")
     fp32_model = common.build_model()
     sim = {}
 
-    if Path(str(common.ENGINE_DIR / "resnet50_fp16.engine")).exists():
-        trt_fp16_fn = load_trt_infer(str(common.ENGINE_DIR / "resnet50_fp16.engine"))
-        sim["trt_fp16_vs_fp32"] = compute_logit_similarity(fp32_model, trt_fp16_fn)
+    fp16_eng = common.engine_path("fp16.engine")
+    int8_eng = common.engine_path("int8.engine")
+
+    if fp16_eng.exists():
+        sim["trt_fp16_vs_fp32"] = compute_logit_similarity(
+            fp32_model, load_trt_infer(str(fp16_eng)))
         print("TRT FP16 logit similarity:", sim["trt_fp16_vs_fp32"])
 
-    if Path(str(common.ENGINE_DIR / "resnet50_int8.engine")).exists():
-        trt_int8_fn = load_trt_infer(str(common.ENGINE_DIR / "resnet50_int8.engine"))
-        sim["trt_int8_vs_fp32"] = compute_logit_similarity(fp32_model, trt_int8_fn)
+    if int8_eng.exists():
+        sim["trt_int8_vs_fp32"] = compute_logit_similarity(
+            fp32_model, load_trt_infer(str(int8_eng)))
         print("TRT INT8 logit similarity:", sim["trt_int8_vs_fp32"])
 
-    # Print markdown summary table.
-    print("\n## Quantization Results — ResNet50 on ImageNet val (50k)")
+    print(f"\n## Quantization Results — {common.MODEL_NAME} on ImageNet val (50k)")
     print(f"GPU: {common.gpu_name()}, batch eval bs=64, latency bs=1 and bs=64\n")
 
     hdr = ("Precision", "top1%", "top5%", "Δtop1", "lat bs=1 ms",
@@ -186,7 +184,9 @@ def main():
     for k, v in sim.items():
         print(f"  {k}: MSE={v['logits_mse']:.4f}  cosine={v['logits_cosine']:.6f}")
 
-    summary = {"rows": rows, "logit_similarity": sim, "gpu": common.gpu_name()}
+    summary = {"model": common.MODEL_NAME, "rows": rows, "logit_similarity": sim,
+               "gpu": common.gpu_name()}
+    RESULTS.mkdir(parents=True, exist_ok=True)
     out = RESULTS / "summary.json"
     with open(out, "w") as f:
         json.dump(summary, f, indent=2)
@@ -195,3 +195,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

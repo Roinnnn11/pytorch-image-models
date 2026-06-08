@@ -1,14 +1,22 @@
 """Stage 1+2: FP32 baseline and Torch FP16 (autocast) accuracy + latency.
 
+Model is selected via OPTIM_MODEL env var (default: resnet50).
+
 Establishes the reference numbers every later stage is compared against:
   - FP32 top1/top5 over the full val set
   - FP32 latency at bs=1 and bs=64
   - Torch FP16 (inference_mode + autocast) top1/top5 and latency
 
-Writes results to results/baseline.json.
+Writes results to results/<model>/baseline.json.
 """
 import argparse
 import json
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 
@@ -28,7 +36,8 @@ def main():
     loader, dataset = common.build_val_loader(args.batch_size, args.workers, cfg)
 
     print(f"GPU: {common.gpu_name()}")
-    print(f"val images: {len(dataset)} | input_size: {cfg['input_size']} | "
+    print(f"model: {common.MODEL_NAME}  val images: {len(dataset)} | "
+          f"input_size: {cfg['input_size']} | "
           f"crop_pct: {cfg['crop_pct']} | interp: {cfg['interpolation']}")
 
     results = {

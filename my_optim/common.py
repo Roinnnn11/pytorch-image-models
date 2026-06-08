@@ -1,9 +1,14 @@
-"""Shared utilities for the ResNet50 quantization workflow.
+"""Shared utilities for the quantization workflow.
 
 Centralizes the model spec, data config, loaders, accuracy eval and latency
 measurement so every stage (FP32 baseline, Torch FP16, ONNX/TRT) uses an
 identical preprocessing pipeline. This is what makes the cross-precision
 comparison fair.
+
+Model is selected via the OPTIM_MODEL env var (default: resnet50). All
+artifacts are written under per-model subdirectories so multiple models can
+coexist:  onnx/<model>/  engines/<model>/  results/<model>/
+The val/calib datasets are model-agnostic and shared at data/.
 """
 import os
 import sys
@@ -25,20 +30,49 @@ from torchvision.datasets import ImageFolder
 # Use the mirror; huggingface.co is unreachable from this host.
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
-MODEL_NAME = "resnet50"
-DATA_ROOT = Path(__file__).parent / "data"
+# Model is parameterized via OPTIM_MODEL; everything else derives from it.
+MODEL_NAME = os.environ.get("OPTIM_MODEL", "resnet50")
+
+_BASE = Path(__file__).parent
+DATA_ROOT = _BASE / "data"          # shared across models (val + calib)
 VAL_DIR = DATA_ROOT / "val"
 CALIB_DIR = DATA_ROOT / "calib"
-RESULTS_DIR = Path(__file__).parent / "results"
-ONNX_DIR = Path(__file__).parent / "onnx"
-ENGINE_DIR = Path(__file__).parent / "engines"
+# Per-model artifact directories.
+RESULTS_DIR = _BASE / "results" / MODEL_NAME
+ONNX_DIR = _BASE / "onnx" / MODEL_NAME
+ENGINE_DIR = _BASE / "engines" / MODEL_NAME
 
-INPUT_SIZE = (3, 224, 224)
 DEVICE = "cuda"
+
+# Resolved lazily from the model's pretrained cfg (input size varies by model).
+_INPUT_SIZE = None
+
+
+def _resolve_input_size():
+    global _INPUT_SIZE
+    if _INPUT_SIZE is None:
+        cfg = get_data_config()
+        _INPUT_SIZE = tuple(cfg["input_size"])  # (3, H, W)
+    return _INPUT_SIZE
+
+
+def get_input_size():
+    """(C, H, W) input size for the selected model, from its pretrained cfg."""
+    return _resolve_input_size()
+
+
+def onnx_path(suffix: str) -> Path:
+    """Model-prefixed ONNX path, e.g. onnx_path('fp32_dynbatch_inline.onnx')."""
+    return ONNX_DIR / f"{MODEL_NAME}_{suffix}"
+
+
+def engine_path(suffix: str) -> Path:
+    """Model-prefixed engine path, e.g. engine_path('fp16.engine')."""
+    return ENGINE_DIR / f"{MODEL_NAME}_{suffix}"
 
 
 def build_model(exportable: bool = False):
-    """Create a pretrained, eval-mode ResNet50 on CUDA."""
+    """Create a pretrained, eval-mode model on CUDA."""
     model = timm.create_model(MODEL_NAME, pretrained=True, exportable=exportable)
     model.eval().to(DEVICE)
     return model
@@ -46,7 +80,9 @@ def build_model(exportable: bool = False):
 
 def get_data_config(model=None):
     if model is None:
-        model = timm.create_model(MODEL_NAME, pretrained=True)
+        # pretrained_cfg (input_size/mean/std/crop_pct) is populated by the
+        # registry at create_model time and needs no weight download.
+        model = timm.create_model(MODEL_NAME, pretrained=False)
     return resolve_data_config({}, model=model)
 
 
@@ -141,7 +177,7 @@ def evaluate_accuracy(infer_fn, loader, max_batches=None, desc="eval"):
 @torch.inference_mode()
 def measure_latency(infer_fn, batch_size: int, n_warmup=30, n_iter=100):
     """Measure per-batch latency (ms) and throughput (img/s) with CUDA events."""
-    x = torch.randn(batch_size, *INPUT_SIZE, device=DEVICE)
+    x = torch.randn(batch_size, *get_input_size(), device=DEVICE)
     for _ in range(n_warmup):
         infer_fn(x)
     torch.cuda.synchronize()
@@ -169,3 +205,8 @@ def measure_latency(infer_fn, batch_size: int, n_warmup=30, n_iter=100):
 
 def gpu_name():
     return torch.cuda.get_device_name(0)
+
+
+# Initialize module-level INPUT_SIZE now that all functions are defined.
+# This lets existing `common.INPUT_SIZE` references keep working.
+INPUT_SIZE = _resolve_input_size()
