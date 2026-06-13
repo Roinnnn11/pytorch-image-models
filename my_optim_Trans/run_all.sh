@@ -22,7 +22,7 @@
 # Conda env: deepburst
 # Dataset: data/ (symlink to ../my_optim/data — 50k val + 500 calib)
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PY=/data1/liurongying/miniconda3/envs/deepburst/bin/python

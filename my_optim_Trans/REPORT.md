@@ -1,5 +1,13 @@
 # Transformer 模型推理量化加速实验报告
 
+> **2026-06-13 代码审查修正**
+>
+> 下文性能数据是在旧评测脚本上得到的历史记录。当前脚本已经去除 TensorRT
+> wrapper 内的重复同步，并将 fallback 搜索改为：FP32、默认 fake-quant 和
+> 所有候选配置共享同一个类别均衡子集，同时使用 ModelOpt 通配量化规则。
+> 因此第六节的 MLP 根因结论目前应视为待复现实验假设，需以新版
+> `results/<model>/fallback_search.json` 和重新构建的 engine 为准。
+
 **汇报身份**：学生阶段性工作总结  
 **实验日期**：2026-06-08  
 **实验环境**：NVIDIA GeForce RTX 3080 Ti · CUDA 12.8 · TensorRT 10.15.1 · PyTorch 2.10  
@@ -160,13 +168,15 @@ ViT INT8 v1 的 logit cosine 相似度仅为 **0.790**，远低于 FP16 的 0.99
 
 ### 关键结论
 
-**MLP 层（fc1/fc2）是 ViT INT8 精度损失的主因**，而非注意力层（QKV/proj）。
+旧实验提示 **MLP 层（fc1/fc2）可能是 ViT INT8 精度损失的主因**，但新版
+类别均衡搜索尚未在原 GPU 环境复跑，因此不能把它作为已经严格证明的结论。
 
 原因：ViT MLP 中间层（GELU 后）的 activation 分布极宽，per-tensor 校准 amax 最高达 64–199，严重超出 INT8 表示范围（−128 到 127 × scale），导致大量数值被截断。而 attn 层 amax 普遍在 2–20 以内，per-tensor INT8 完全可承受。
 
 - 将全部 12 个 block 的 MLP 回退 FP16 后，top1 **恢复至 85.01%**（仅比 FP32 差 0.09%），logit cosine **从 0.790 提升至 0.988**。
 - 仅回退深层（blocks 8–11）反而使 cosine 降至 0.782，因为浅层 MLP 误差会被后续层部分吸收，局部回退打破了这种补偿。
-- **结论**：对 ViT 使用 INT8 时，MLP 层需要 per-channel activation 量化（SmoothQuant 方向）或整体保留 FP16，才能同时保证速度和分布质量。
+- **待验证方向**：对 ViT 使用 INT8 时，可尝试 SmoothQuant 将激活离群值的
+  量化难度迁移到权重，或把敏感 MLP 保留为 FP16，再比较精度和速度。
 
 ---
 
@@ -203,7 +213,9 @@ ViT INT8 v1 的 logit cosine 相似度仅为 **0.790**，远低于 FP16 的 0.99
 
 ## 八、下一步方向
 
-1. **SmoothQuant**：对 ViT MLP 的宽激活分布问题，使用 per-channel activation 量化（ModelOpt `SMOOTH_QUANT_CFG`），有望在不牺牲速度的前提下将 cosine 推过 0.95。
+1. **SmoothQuant**：对 ViT MLP 的宽激活分布问题，将激活通道离群值的量化
+   难度迁移到权重；部署时通常仍采用 per-tensor activation 与 per-channel
+   weight。实际 cosine 改善需要重新实验，不能预设目标值。
 2. **校准集优化**：当前 500 张校准图像全为 ImageNet，对 domain-specific 任务建议用目标域数据校准。
 3. **FP8**：TRT 10.15 已支持 `BuilderFlag.FP8`，在 Ada 架构（RTX 40xx）上 FP8 速度接近 INT8 但精度更接近 FP16，值得试验。
 4. **tiling_optimization_level**：当前 `TilingOptimizationLevel.NONE`，对 Swin 的窗口划分模式可能有进一步提升空间。

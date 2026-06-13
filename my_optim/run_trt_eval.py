@@ -25,7 +25,7 @@ import common
 
 
 class TRTInferencer:
-    """Thin wrapper around a TRT engine for synchronous FP32-I/O inference."""
+    """Thin wrapper around a TRT engine for asynchronous FP32-I/O inference."""
 
     def __init__(self, engine_path: str):
         logger = trt.Logger(trt.Logger.WARNING)
@@ -45,7 +45,6 @@ class TRTInferencer:
         self.context.set_tensor_address(self.input_name, images.data_ptr())
         self.context.set_tensor_address(self.output_name, out.data_ptr())
         self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
-        torch.cuda.synchronize()
         return out
 
 

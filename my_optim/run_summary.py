@@ -74,7 +74,6 @@ def load_trt_infer(engine_path: str):
         ctx.set_tensor_address(inp_name, x.data_ptr())
         ctx.set_tensor_address(out_name, out.data_ptr())
         ctx.execute_async_v3(torch.cuda.current_stream().cuda_stream)
-        torch.cuda.synchronize()
         return out
 
     return infer

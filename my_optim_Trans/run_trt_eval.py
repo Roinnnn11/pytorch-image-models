@@ -24,7 +24,7 @@ import common
 
 
 class TRTInferencer:
-    """Thin wrapper around a TRT engine for synchronous FP32-I/O inference."""
+    """Thin wrapper around a TRT engine for asynchronous FP32-I/O inference."""
 
     def __init__(self, engine_path: str):
         logger = trt.Logger(trt.Logger.WARNING)
@@ -44,7 +44,6 @@ class TRTInferencer:
         self.context.set_tensor_address(self.input_name, images.data_ptr())
         self.context.set_tensor_address(self.output_name, out.data_ptr())
         self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
-        torch.cuda.synchronize()
         return out
 
 
@@ -55,10 +54,21 @@ def main():
                         help="eval and throughput batch size (default=32)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-batches", type=int, default=None)
+    parser.add_argument(
+        "--engine-suffix",
+        default=None,
+        help="Override the model-prefixed engine suffix, e.g. int8_mixed.engine.",
+    )
+    parser.add_argument(
+        "--result-tag",
+        default=None,
+        help="Override the JSON result tag, e.g. trt_int8_mixed.",
+    )
     args = parser.parse_args()
 
-    tag = f"trt_{args.precision}"
-    eng_p = common.engine_path(f"{args.precision}.engine")
+    engine_suffix = args.engine_suffix or f"{args.precision}.engine"
+    tag = args.result_tag or f"trt_{Path(engine_suffix).stem}"
+    eng_p = common.engine_path(engine_suffix)
 
     if not eng_p.exists():
         print(f"engine not found: {eng_p}")

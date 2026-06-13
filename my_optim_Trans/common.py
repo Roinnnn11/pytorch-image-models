@@ -110,7 +110,7 @@ def build_val_transform(cfg=None):
     )
 
 
-def build_val_loader(batch_size: int = None, workers: int = 8, cfg=None):
+def build_val_loader(batch_size: int = None, workers: int = 8, cfg=None, sampler=None):
     if batch_size is None:
         batch_size = EVAL_BATCH_SIZE
     transform = build_val_transform(cfg)
@@ -119,6 +119,7 @@ def build_val_loader(batch_size: int = None, workers: int = 8, cfg=None):
         dataset,
         batch_size=batch_size,
         shuffle=False,
+        sampler=sampler,
         num_workers=workers,
         pin_memory=True,
         drop_last=False,
@@ -165,6 +166,7 @@ def evaluate_accuracy(infer_fn, loader, max_batches=None, desc="eval"):
         images = images.to(DEVICE, non_blocking=True)
         targets = targets.to(DEVICE, non_blocking=True)
         logits = infer_fn(images)
+        torch.cuda.synchronize()
         if not torch.is_tensor(logits):
             logits = torch.as_tensor(logits, device=DEVICE)
         _, pred = logits.topk(5, dim=1, largest=True, sorted=True)
@@ -175,6 +177,8 @@ def evaluate_accuracy(infer_fn, loader, max_batches=None, desc="eval"):
         if bi % 50 == 0:
             print(f"[{desc}] batch {bi} n={n} top1={100*top1/n:.2f}%", flush=True)
     dt = time.time() - t0
+    if n == 0:
+        raise ValueError("evaluation loader produced no samples")
     return {
         "top1": 100.0 * top1 / n,
         "top5": 100.0 * top5 / n,

@@ -1,5 +1,14 @@
 # pytorch-image-models 量化加速工作笔记（详细解释版）
 
+> **2026-06-13 修正说明**
+>
+> 本文中的性能表是修正评测脚本之前得到的历史结果。当前代码已经修正
+> TensorRT 重复同步、Transformer fallback 非代表性抽样、ModelOpt 排除规则，
+> 并把 FP16+INT8、opt level 5、timing cache 等新版 builder 配置同步到 CNN。
+> 因此 ResNet/MobileNet 的 INT8 速度结论，以及 ViT fallback 的层敏感度结论，
+> 都需要在原 CUDA/TensorRT/ImageNet 环境重新运行后再定稿。旧数字保留用于
+> 记录实验演进，不应作为修正后代码的最终结果。
+
 ## 1. 工作目标
 
 本次工作围绕 `pytorch-image-models` / `timm` 中的典型 ImageNet 分类模型，完成从 PyTorch 推理到 TensorRT 部署的量化加速验证。核心目标包括：
@@ -428,6 +437,9 @@ INT8 v1 的 Q/DQ build 配置还没有达到最佳部署形态。
 
 ### 8.1 ResNet50
 
+> 历史结果：使用旧 strongly-typed INT8 builder，尚未用修正后的
+> weakly-typed FP16+INT8、`opt_bs=64` 配置复测。
+
 batch 吞吐使用 `bs=64`。
 
 | 精度模式 | Top1 | Top5 | Top1 drop | bs1 延迟 | bs64 延迟 | 吞吐 | 相对 FP32 加速 |
@@ -444,6 +456,9 @@ batch 吞吐使用 `bs=64`。
 - 对 ResNet50 来说，当前 INT8 不如 FP16 划算。
 
 ### 8.2 MobileNetV3-Large
+
+> 历史结果：使用旧 strongly-typed INT8 builder。校准消融数字可用于描述
+> 探索过程，但最终速度与精度需要用修正后的 builder 和评测脚本复测。
 
 batch 吞吐使用 `bs=64`。
 
@@ -473,6 +488,10 @@ MobileNetV3 INT8 校准消融：
 percentile 99.99 是当前相对最好的 INT8 变体，但仍然没有达到“准确率不低”的目标。
 
 ### 8.3 ViT-B/16
+
+> 历史结果：INT8 v2 性能数据仍有参考价值，但旧 fallback 搜索没有让 FP32、
+> 默认 fake-quant 和候选配置使用同一个类别均衡子集。MLP 敏感度结论必须由
+> 新版 `fallback_search.json` 重新验证。
 
 batch 吞吐使用 `bs=32`。
 

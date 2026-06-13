@@ -17,14 +17,14 @@ FP16:
   Weakly-typed network + BuilderFlag.FP16.
 
 INT8 (Q/DQ ONNX):
-  STRONGLY_TYPED + BuilderFlag.FP16 + BuilderFlag.INT8.
-  - STRONGLY_TYPED: TRT reads QuantizeLinear/DequantizeLinear scale nodes and
-    maps those ops to INT8 tensor-core GEMM kernels.
+  Weakly-typed network + BuilderFlag.FP16 + BuilderFlag.INT8.
+  - Q/DQ nodes carry the scales used to map eligible ops to INT8 kernels.
   - FP16 flag: non-quantized ops (LayerNorm, Softmax, residual adds, GELU) run
     FP16 instead of FP32. Without this flag those ops default to FP32 and
     dominate latency, eliminating most of the INT8 throughput advantage.
   - INT8 flag: enables INT8 tensor-core selection for Q/DQ-bracketed layers.
-  In TRT 10.15 all three flags are compatible on STRONGLY_TYPED networks.
+  TRT 10.15 rejects precision flags on a STRONGLY_TYPED network, so this path
+  intentionally uses a weakly typed network.
 
 Optimization profile:
   opt=32 (matches eval/throughput batch), max=64 for sweep headroom.
