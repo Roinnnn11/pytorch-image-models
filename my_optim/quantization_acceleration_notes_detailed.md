@@ -2,12 +2,11 @@
 
 > **2026-06-13 修正说明**
 >
-> 本文中的性能表是修正评测脚本之前得到的历史结果。当前代码已经修正
-> TensorRT 重复同步、Transformer fallback 非代表性抽样、ModelOpt 排除规则，
-> 并把 FP16+INT8、opt level 5、timing cache 等新版 builder 配置同步到 CNN。
-> 因此 ResNet/MobileNet 的 INT8 速度结论，以及 ViT fallback 的层敏感度结论，
-> 都需要在原 CUDA/TensorRT/ImageNet 环境重新运行后再定稿。旧数字保留用于
-> 记录实验演进，不应作为修正后代码的最终结果。
+> 当前代码已经修正 TensorRT 重复同步、Transformer fallback 非代表性抽样、
+> ModelOpt 排除规则，并把 FP16+INT8、opt level 5、timing cache 等新版
+> builder 配置同步到 CNN。ViT-B/16 已在原环境完成修正后复测，第 8.3 节为
+> 正式结果；ResNet50、MobileNetV3 和 Swin-T 仍保留原实验数据，需在比较最终
+> 横向排名前按新版脚本复测。
 
 ## 1. 工作目标
 
@@ -489,48 +488,48 @@ percentile 99.99 是当前相对最好的 INT8 变体，但仍然没有达到“
 
 ### 8.3 ViT-B/16
 
-> 历史结果：INT8 v2 性能数据仍有参考价值，但旧 fallback 搜索没有让 FP32、
-> 默认 fake-quant 和候选配置使用同一个类别均衡子集。MLP 敏感度结论必须由
-> 新版 `fallback_search.json` 重新验证。
+> 修正后正式结果：去除 TRT wrapper 重复同步，并使用 2,000 张类别均衡子集
+> 搜索 fallback。以下结果均由修正后的流程重新构建或评测。
 
 batch 吞吐使用 `bs=32`。
 
-| 精度模式 | Top1 | Top5 | Top1 drop | bs1 延迟 | bs32 延迟 | 吞吐 | 相对 FP32 加速 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| FP32 torch | 85.104 | 97.526 | 0.000 | 4.501 ms | 89.782 ms | 356 img/s | 1.00x |
-| Torch FP16 | 85.110 | 97.528 | -0.006 | 4.741 ms | 29.432 ms | 1087 img/s | 3.05x |
-| TRT FP16 | 85.104 | 97.530 | 0.000 | 3.494 ms | 16.762 ms | 1909 img/s | 5.36x |
-| TRT INT8 v1 strongly typed | 83.312 | 96.756 | 1.792 | 2.102 ms | 21.273 ms | 1504 img/s | 4.22x |
-| TRT INT8 v2 FP16+INT8 | 83.376 | 96.778 | 1.728 | 1.535 ms | 9.649 ms | 3316 img/s | 9.30x |
+| 精度模式 | Top1 | Top1 drop（百分点） | bs1 延迟 | bs32 吞吐 | bs1 加速 | 吞吐加速 |
+|---|---:|---:|---:|---:|---:|---:|
+| FP32 torch | 85.104 | 0.000 | 4.50 ms | 356 img/s | 1.00x | 1.00x |
+| TRT FP16 | 85.104 | 0.000 | 2.95 ms | 2409 img/s | 1.53x | 6.77x |
+| TRT INT8 全量 | 83.312 | 1.792 | **1.80 ms** | 1979 img/s | **2.50x** | 5.56x |
+| **TRT INT8 混合精度（MLP→FP16）** | **85.034** | **0.070** | **1.87 ms** | **2367 img/s** | **2.41x** | **6.65x** |
 
 分析：
 
-- v1 说明 strongly typed Q/DQ 可以跑通，但 batch throughput 不如 FP16。
-- v2 对齐 `--fp16 --int8` 后，bs1 和 bs32 都明显快于 TRT FP16。
-- v2 的 Top1 drop 为 1.728%，仍是主要问题。
-- ViT 的 MLP 层对 INT8 精度非常敏感。
+- TRT FP16 完全保持 FP32 精度，bs=1 加速 1.53x，bs=32 吞吐加速 6.77x。
+- 全量 INT8 的 bs=1 最快，但 Top1 下降 1.792 个百分点。
+- MLP 回退 FP16 后，Top1 恢复 1.722 个百分点，只比 FP32 低 0.070 个百分点。
+- 混合精度仅比全量 INT8 慢 0.07 ms，但吞吐反而高 19.6%；它还保留了 TRT
+  FP16 98.3% 的吞吐，因此是本次 ViT 实验的最佳精度/速度折中。
 
-ViT 额外实验：
+类别均衡 fallback 搜索（相同 2,000 张图像）：
 
-1. `WeaklyTyped + FP16 + INT8` build 变体：
-   - Top1 = 83.376，比标准 INT8 v1 的 83.312 略好。
-   - bs1 = 1.535 ms，bs32 = 9.649 ms，吞吐约 3316 img/s。
-   - 说明 build 配置对速度影响很大，但精度改善有限。
+| 配置 | 子集 Top1 | 相对 FP32 下降 |
+|---|---:|---:|
+| FP32 | 84.7 | 0.0 个百分点 |
+| 默认 INT8 | 83.2 | 1.5 个百分点 |
+| **MLP→FP16** | **84.4** | **0.3 个百分点** |
 
-2. `head + attn.qkv + attn.proj` 回退 FP16：
-   - Top1 = 83.460。
-   - bs1 = 2.568 ms，bs32 = 26.986 ms。
-   - 精度改善有限，速度下降。
+子集搜索和 ImageNet val 50k 的最终 engine 结果方向一致，确认 MLP
+`fc1/fc2` 是本次 ViT-B/16 PTQ 精度损失的主因。这里的“主因”不是只根据
+旧的层分布观察推测，而是经过同一批样本公平对照后得到的结果。
 
-3. `mlp.fc1 + mlp.fc2` 回退 FP16：
-   - Top1 = 84.996，距离 FP32 只差约 0.108%。
-   - 但 bs1 = 4.308 ms，bs32 = 39.902 ms，速度明显变慢。
+> 修正前曾记录 TRT FP16 3.494 ms / 1909 img/s、INT8 v2
+> 83.376% / 1.535 ms / 3316 img/s，以及 MLP fallback 84.996%。
+> 这些结果受到重复同步或旧 fallback 抽样口径影响，仅作为历史记录。
 
 结论：
 
 - ViT 的 INT8 精度瓶颈主要来自 MLP。
-- 如果追求准确率，MLP 回退 FP16 有效。
-- 如果追求速度，MLP 回退会抵消 INT8 加速收益。
+- MLP 回退 FP16 不仅有效恢复精度，而且没有抵消主要加速收益。
+- 当前部署优先选择 MLP→FP16 混合精度；只有在 bs=1 延迟比精度更重要时，
+  才优先考虑全量 INT8。
 
 ### 8.4 Swin-Tiny
 
@@ -559,7 +558,7 @@ batch 吞吐使用 `bs=32`。
 
 - ResNet50：5.10x
 - MobileNetV3：4.03x
-- ViT-B/16：5.36x
+- ViT-B/16：6.77x（修正后复测）
 - Swin-Tiny：5.78x
 
 因此，如果目标是稳定部署，当前最推荐 TRT FP16。
@@ -570,15 +569,19 @@ INT8 v1 结果不符合“比 FP16 快且准确率不低”的期待：
 
 - ResNet50：INT8 比 FP16 慢，Top1 还下降 1.61%。
 - MobileNetV3：INT8 比 FP16 慢，Top1 下降 4.11%。
-- ViT-B/16 v1：INT8 bs1 快于 FP16，但 batch throughput 慢于 FP16，Top1 下降 1.79%。
+- ViT-B/16 全量 INT8：bs1 为 1.80 ms，但 batch throughput 低于 TRT FP16，
+  Top1 下降 1.792 个百分点。
 - Swin-Tiny v1：INT8 bs1 略快，精度下降可接受，但 batch throughput 慢于 FP16。
 
-补做 v2 后，Transformer 模型的速度结论发生变化：
+修正后复测与混合精度实验使 ViT 的结论进一步明确：
 
-- ViT-B/16 v2：bs1 1.535 ms，bs32 9.649 ms，吞吐 3316 img/s，速度明显超过 TRT FP16；但 Top1 仍下降 1.728%。
+- ViT-B/16 MLP→FP16：bs1 1.87 ms、bs32 吞吐 2367 img/s，Top1
+  85.034%，仅下降 0.070 个百分点。
 - Swin-Tiny v2：bs1 1.186 ms，bs32 6.056 ms，吞吐 5284 img/s，速度和精度都优于 v1，Top1 只下降 0.372%。
 
-因此，最新结论是：INT8 的速度潜力已经在 v2 中验证出来，但不同模型的精度问题仍需要单独优化。
+因此，最新结论是：INT8 的速度潜力已经验证出来，但不同模型需要结合结构
+选择精度策略。ViT-B/16 适合将敏感 MLP 保留为 FP16，Swin-T 当前则可继续
+使用全量 INT8 v2。
 
 ### 9.3 INT8 不理想的主要原因
 
@@ -600,7 +603,8 @@ INT8 v1 结果不符合“比 FP16 快且准确率不低”的期待：
 
 5. dynamic shape profile 可能不是最优。
 
-   当前 engine 支持动态 batch，例如 `min=1, opt=32, max=64` 或 Transformer 的 `min=1, opt=16, max=32`。实际测速在 max batch 上跑时，可能没有固定 shape engine 那么极致。
+   当前 engine 支持动态 batch，例如 `min=1, opt=32, max=64`。实际测速 shape
+   与 opt shape 差异较大时，可能没有专用固定 shape engine 那么极致。
 
 ## 10. 后续优化建议
 
@@ -648,8 +652,11 @@ INT8 v1 结果不符合“比 FP16 快且准确率不低”的期待：
 
 ```text
 TensorRT FP16 是稳定可用的加速方案；
-INT8 使用了正确的 Q/DQ 方法，v2 build 已经验证出明显速度潜力；
-后续重点是降低不同模型的 INT8 精度损失。
+INT8 使用了正确的 Q/DQ 方法，已经验证出明显速度潜力；
+ViT-B/16 通过 MLP→FP16 将精度损失压到 0.070 个百分点，同时保持 2.41x bs1 加速；
+后续重点是按模型结构寻找精度与速度的最佳混合方案。
 ```
 
-因此，当前工作可以作为“量化加速实验阶段完成”的结果；如果后续继续深入，则重点应放在 INT8 engine build 对齐、layer profiling 和更细粒度校准上。
+因此，当前工作可以作为“量化加速实验阶段完成”的结果；如果后续继续深入，
+则重点应放在其余模型的修正后复测、layer profiling、SmoothQuant 和更细粒度
+混合精度搜索上。
