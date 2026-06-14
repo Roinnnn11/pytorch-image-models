@@ -1,12 +1,12 @@
 # pytorch-image-models 量化加速工作笔记（详细解释版）
 
-> **2026-06-13 修正说明**
+> **2026-06-15 四模型复测完成**
 >
 > 当前代码已经修正 TensorRT 重复同步、Transformer fallback 非代表性抽样、
 > ModelOpt 排除规则，并把 FP16+INT8、opt level 5、timing cache 等新版
-> builder 配置同步到 CNN。ViT-B/16 已在原环境完成修正后复测，第 8.3 节为
-> 正式结果；ResNet50、MobileNetV3 和 Swin-T 仍保留原实验数据，需在比较最终
-> 横向排名前按新版脚本复测。
+> builder 配置同步到 CNN。ResNet50、MobileNetV3-Large、ViT-B/16 和 Swin-T
+> 均已在原环境完成新版评测。第 8 节之后为当前正式结果；旧数据仅作为实验
+> 演进记录，不再用于最终横向比较。
 
 ## 1. 工作目标
 
@@ -428,70 +428,89 @@ BuilderFlag.FP16
 INT8 v1 的 Q/DQ build 配置还没有达到最佳部署形态。
 ```
 
-后续补做的 INT8 v2 改成 `FP16 + INT8` build 后，ViT 和 Swin 的速度明显提升，这进一步证明问题主要出在 build 策略，而不是 Q/DQ 方法本身。
+后续补做的 INT8 v2 改成 `FP16 + INT8` build 后，四个模型均使用新版流程
+重新评测。Swin 的 v2 吞吐达到旧 v1 的 2.12x，说明早期速度问题很大一部分
+来自 builder 配置；不同模型剩余的精度问题则需要结合架构单独处理。
 
 ## 8. 实验结果汇总
 
-说明：`summary.json` 中的主结果最初记录的是 INT8 v1，即 `STRONGLY_TYPED` Q/DQ build。后续又补做了 INT8 v2：`weakly-typed + FP16 + INT8 flags`，相当于 trtexec `--fp16 --int8`，并提高 builder optimization level、使用 timing cache。ViT 和 Swin 的最新 INT8 结论应以 v2 为准。
+统一口径：
 
-### 8.1 ResNet50
+- 精度使用 ImageNet validation 50k Top1。
+- `ΔTop1 = 当前 Top1 - FP32 Top1`，负数表示精度下降，单位为百分点。
+- 延迟为 `bs=1`，吞吐统一使用 `bs=32`。
+- 除明确标为“旧引擎”的 Swin v1 历史对照外，正式 INT8 结果均使用修正后的
+  builder 和评测脚本。
 
-> 历史结果：使用旧 strongly-typed INT8 builder，尚未用修正后的
-> weakly-typed FP16+INT8、`opt_bs=64` 配置复测。
+### 8.1 四模型推荐结果
 
-batch 吞吐使用 `bs=64`。
+| 模型 | 推荐路径 | Top1 | ΔTop1 | bs1 延迟 | bs32 吞吐 | 推荐理由 |
+|---|---|---:|---:|---:|---:|---|
+| ViT-B/16 | INT8 混合（MLP→FP16） | 85.034 | −0.070 | 1.87 ms | 2367 img/s | 几乎无损，bs1 较 FP32 加速 2.41x |
+| Swin-T | 全量 INT8 v2 | 81.006 | −0.372 | 1.25 ms | 5358 img/s | 无需 fallback，吞吐为 FP16 的 1.33x |
+| ResNet50 | TRT FP16 | 80.406 | +0.030 | 1.00 ms | 7831 img/s | 当前混合 INT8 仍下降 1.060 个百分点 |
+| MobileNetV3-L | TRT FP16 | 75.762 | +0.006 | 0.639 ms | 20602 img/s | 混合 INT8 收益很小，FP16 更简单 |
 
-| 精度模式 | Top1 | Top5 | Top1 drop | bs1 延迟 | bs64 延迟 | 吞吐 | 相对 FP32 加速 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| FP32 torch | 80.376 | 94.590 | 0.000 | 4.074 ms | 48.260 ms | 1326 img/s | 1.00x |
-| Torch FP16 | 80.364 | 94.588 | 0.012 | 5.233 ms | 27.792 ms | 2303 img/s | 1.74x |
-| TRT FP16 | 80.380 | 94.588 | -0.004 | 1.106 ms | 9.453 ms | 6770 img/s | 5.10x |
-| TRT INT8 | 78.764 | 93.804 | 1.612 | 1.167 ms | 14.873 ms | 4303 img/s | 3.24x |
+这张表是部署建议，不代表其他路径没有实验价值。完整数据如下。
 
-分析：
+### 8.2 ResNet50
 
-- TRT FP16 精度基本无损，并且速度最佳。
-- TRT INT8 有 1.61% Top1 下降，速度也慢于 TRT FP16。
-- 对 ResNet50 来说，当前 INT8 不如 FP16 划算。
-
-### 8.2 MobileNetV3-Large
-
-> 历史结果：使用旧 strongly-typed INT8 builder。校准消融数字可用于描述
-> 探索过程，但最终速度与精度需要用修正后的 builder 和评测脚本复测。
-
-batch 吞吐使用 `bs=64`。
-
-| 精度模式 | Top1 | Top5 | Top1 drop | bs1 延迟 | bs64 延迟 | 吞吐 | 相对 FP32 加速 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| FP32 torch | 75.772 | 92.534 | 0.000 | 4.481 ms | 13.394 ms | 4778 img/s | 1.00x |
-| Torch FP16 | 75.768 | 92.538 | 0.004 | 5.807 ms | 8.249 ms | 7758 img/s | 1.62x |
-| TRT FP16 | 75.754 | 92.524 | 0.018 | 0.858 ms | 3.320 ms | 19280 img/s | 4.03x |
-| TRT INT8 | 71.664 | 90.032 | 4.108 | 0.982 ms | 6.951 ms | 9207 img/s | 1.93x |
+| 精度模式 | Top1 | ΔTop1 | bs1 延迟 | bs32 吞吐 | bs1 加速 | 吞吐加速 |
+|---|---:|---:|---:|---:|---:|---:|
+| FP32 torch | 80.376 | — | 4.31 ms | 1455 img/s | 1.00x | 1.00x |
+| TRT FP16 | 80.406 | +0.030 | 1.00 ms | 7831 img/s | 4.31x | 5.38x |
+| TRT INT8 全量 | 78.738 | −1.638 | **0.888 ms** | **10177 img/s** | **4.85x** | **6.99x** |
+| TRT INT8 混合（layer1+2→FP16） | 79.316 | −1.060 | 0.917 ms | 9461 img/s | 4.70x | 6.50x |
 
 分析：
 
-- TRT FP16 速度非常好，精度几乎不变。
-- MobileNetV3 的 INT8 精度下降明显，Top1 drop 超过 4%。
-- 该模型包含 hard-swish、depthwise conv、SE 等结构，activation 分布对 max calibration 很敏感。
-- 虽然做了 percentile / mse 校准消融，但当前 INT8 仍不适合作为最终部署方案。
+- 全量 INT8 的吞吐比 TRT FP16 高 30.0%，但损失 1.638 个百分点。
+- 回退 `layer1+2` 后恢复 0.578 个百分点，性能只比全量 INT8 低约 7%，说明
+  浅层是本次分组实验中更敏感的区域。
+- 但混合精度仍比 FP32 低 1.060 个百分点，尚未达到近乎无损，因此当前正式
+  部署仍优先 TRT FP16。
+- 早期统计中 pool/maxpool 附近 amax 约为 53.4，与浅层敏感现象一致。它可能
+  来自浅层激活离群值或通道间尺度差异，但仍需逐层误差和 profiler 数据确认。
+- 下一步优先尝试更小粒度的浅层回退、percentile/MSE 校准或 cross-layer
+  equalization。activation per-channel 只有在部署后端支持时才值得尝试。
 
-MobileNetV3 INT8 校准消融：
+### 8.3 MobileNetV3-Large
 
-| 变体 | 校准方式 | Top1 | Top1 变化 | bs64 延迟 | 吞吐 |
-|---|---|---:|---:|---:|---:|
-| V0 | max | 59.664 | -16.106 | 7.088 ms | 9029 img/s |
-| V1 | percentile 99.9 | 70.574 | -5.196 | 13.955 ms | 4586 img/s |
-| V2 | percentile 99.99 | 71.664 | -4.106 | 6.951 ms | 9207 img/s |
-| V3 | mse | 68.822 | -6.948 | 7.100 ms | 9014 img/s |
+| 精度模式 | Top1 | ΔTop1 | bs1 延迟 | bs32 吞吐 | bs1 加速 | 吞吐加速 |
+|---|---:|---:|---:|---:|---:|---:|
+| FP32 torch | 75.756 | — | 4.68 ms | 4267 img/s | 1.00x | 1.00x |
+| TRT FP16 | 75.762 | +0.006 | **0.639 ms** | **20602 img/s** | **7.32x** | **4.83x** |
+| TRT INT8 全量 | 59.516 | −16.240 | 0.916 ms | 13181 img/s | 5.11x | 3.09x |
+| TRT INT8 混合（blocks 0–5→FP16） | 75.658 | −0.098 | 0.662 ms | 19812 img/s | 7.07x | 4.64x |
 
-percentile 99.99 是当前相对最好的 INT8 变体，但仍然没有达到“准确率不低”的目标。
+分析：
 
-### 8.3 ViT-B/16
+- 全量 per-tensor INT8 下降 16.240 个百分点，且速度低于 TRT FP16，不能用于
+  最终部署。
+- 回退 blocks 0–5 后恢复 **16.142 个百分点**，最终只比 FP32 低 0.098 个
+  百分点，并保留 TRT FP16 **96.2%** 的吞吐。
+- 但该方案只让尾部少量 block 保持 INT8，实际 INT8 覆盖率和额外工程复杂度
+  不成比例。因此默认推荐 TRT FP16；只有必须保留 INT8 部署链路时才使用混合
+  engine。
+- blocks 0–5 包含 depthwise convolution、hard-swish 和 SE。观察到
+  `blocks.0.0` 输出 amax 约 82.4，blocks.2 的 SE 输出也更宽，说明早期通道
+  尺度不均和离群值可能是 per-tensor scale 失真的主要机制。
+
+旧流程中的校准消融仍可作为补充证据，但不能替代新版最终结果：
+
+| 旧变体 | 校准方式 | Top1 | 相对旧 FP32 下降 |
+|---|---|---:|---:|
+| V0 | max | 59.664 | 16.106 个百分点 |
+| V1 | percentile 99.9 | 70.574 | 5.196 个百分点 |
+| V2 | percentile 99.99 | 71.664 | 4.106 个百分点 |
+| V3 | mse | 68.822 | 6.948 个百分点 |
+
+percentile 99.99 虽比 max calibration 好，但仍不如 blocks 0–5 混合精度。
+
+### 8.4 ViT-B/16
 
 > 修正后正式结果：去除 TRT wrapper 重复同步，并使用 2,000 张类别均衡子集
 > 搜索 fallback。以下结果均由修正后的流程重新构建或评测。
-
-batch 吞吐使用 `bs=32`。
 
 | 精度模式 | Top1 | Top1 drop（百分点） | bs1 延迟 | bs32 吞吐 | bs1 加速 | 吞吐加速 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -531,112 +550,72 @@ batch 吞吐使用 `bs=32`。
 - 当前部署优先选择 MLP→FP16 混合精度；只有在 bs=1 延迟比精度更重要时，
   才优先考虑全量 INT8。
 
-### 8.4 Swin-Tiny
+### 8.5 Swin-Tiny
 
-batch 吞吐使用 `bs=32`。
-
-| 精度模式 | Top1 | Top5 | Top1 drop | bs1 延迟 | bs32 延迟 | 吞吐 | 相对 FP32 加速 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| FP32 torch | 81.378 | 95.540 | 0.000 | 6.626 ms | 46.028 ms | 695 img/s | 1.00x |
-| Torch FP16 | 81.380 | 95.540 | -0.002 | 8.757 ms | 22.435 ms | 1426 img/s | 2.05x |
-| TRT FP16 | 81.358 | 95.544 | 0.020 | 1.347 ms | 7.957 ms | 4021 img/s | 5.78x |
-| TRT INT8 v1 strongly typed | 80.902 | 95.258 | 0.476 | 1.106 ms | 10.387 ms | 3081 img/s | 4.43x |
-| TRT INT8 v2 FP16+INT8 | 81.006 | 95.328 | 0.372 | 1.186 ms | 6.056 ms | 5284 img/s | 7.60x |
+| 精度模式 | Top1 | ΔTop1 | bs1 延迟 | bs32 吞吐 | bs1 加速 | 吞吐加速 |
+|---|---:|---:|---:|---:|---:|---:|
+| FP32 torch | 81.378 | — | 6.63 ms | 695 img/s | 1.00x | 1.00x |
+| TRT FP16 | 81.358 | −0.020 | 1.35 ms | 4021 img/s | 4.91x | 5.79x |
+| TRT INT8 v1（旧引擎） | 80.902 | −0.476 | 1.29 ms | 2523 img/s | 5.14x | 3.63x |
+| TRT INT8 v2 | 81.006 | −0.372 | **1.25 ms** | **5358 img/s** | **5.30x** | **7.71x** |
 
 分析：
 
-- Swin-Tiny 是当前 INT8 最健康的模型。
-- v2 Top1 只下降 0.372%。
-- v2 的 bs32 吞吐达到 5284 img/s，超过 TRT FP16 的 4021 img/s。
-- 这说明此前 INT8 慢于 FP16 的主要原因不是 Q/DQ 方法本身，而是 build 策略没有充分启用 FP16 fallback 和更激进的 TensorRT 优化。
+- v2 Top1 只下降 0.372 个百分点，当前无需 fallback。
+- v2 吞吐为 TRT FP16 的 1.33x、旧 v1 的 2.12x，证明 builder 配置修正有效。
+- 在本次模型和校准配置下，Swin 的窗口化层级结构比 ViT 全局注意力表现出
+  更好的全量 INT8 适配性；这是实验观察，不应外推为所有窗口模型都如此。
 
 ## 9. 总体结论
 
-### 9.1 TRT FP16 是当前最稳的部署方案
+### 9.1 架构差异决定量化策略
 
-四个模型中，TRT FP16 都实现了接近无损的精度，并且有稳定加速：
+| 模型 | 架构特征 | 全量 INT8 下降 | 混合精度下降 | 本次敏感区域 | 推荐路径 |
+|---|---|---:|---:|---|---|
+| ViT-B/16 | 全局 attention + MLP | 1.792 | 0.070 | MLP fc1/fc2 | INT8 混合 |
+| Swin-T | 层级窗口 attention | 0.372 | 无需 | 未发现必须回退的层组 | 全量 INT8 v2 |
+| ResNet50 | 标准残差 CNN | 1.638 | 1.060 | 浅层 layer1/2 | FP16 或继续调校准 |
+| MobileNetV3-L | depthwise + SE + hard-swish | 16.240 | 0.098 | blocks 0–5 | FP16；混合作为备选 |
 
-- ResNet50：5.10x
-- MobileNetV3：4.03x
-- ViT-B/16：6.77x（修正后复测）
-- Swin-Tiny：5.78x
+核心规律：
 
-因此，如果目标是稳定部署，当前最推荐 TRT FP16。
+1. **Swin 最适合全量 INT8**：精度下降小，且吞吐明显超过 FP16。
+2. **ViT 需要结构化混合精度**：MLP 是主要敏感区域，回退后几乎无损。
+3. **ResNet 的敏感区域在浅层**：与“越深越敏感”的直觉不一致，说明必须实测，
+   不能只按层深猜测。
+4. **MobileNetV3 对 per-tensor activation 最敏感**：depthwise 和 SE 的通道
+   尺度差异使全量 INT8 失效，大片回退后才恢复精度。
 
-### 9.2 INT8 当前结论需要区分 v1 和 v2
+### 9.2 混合精度有效，但不是自动等于最优
 
-INT8 v1 结果不符合“比 FP16 快且准确率不低”的期待：
+分组 fallback 在 ViT、ResNet 和 MobileNetV3 上都恢复了精度，但当前仓库的
+类别均衡自动搜索脚本只覆盖 Transformer。CNN 的回退组仍是实验候选配置，
+不能声称已经自动找到“最小 FP16 集合”。
 
-- ResNet50：INT8 比 FP16 慢，Top1 还下降 1.61%。
-- MobileNetV3：INT8 比 FP16 慢，Top1 下降 4.11%。
-- ViT-B/16 全量 INT8：bs1 为 1.80 ms，但 batch throughput 低于 TRT FP16，
-  Top1 下降 1.792 个百分点。
-- Swin-Tiny v1：INT8 bs1 略快，精度下降可接受，但 batch throughput 慢于 FP16。
+此外，更多 INT8 层并不保证 engine 更快。ViT 和 MobileNetV3 的混合 engine
+吞吐都高于其全量 INT8 engine，说明 tactic、fusion、reformat 和不友好的 INT8
+kernel 也会决定最终性能。需要 TensorRT layer profiling 才能解释具体原因。
 
-修正后复测与混合精度实验使 ViT 的结论进一步明确：
+### 9.3 最终部署判断
 
-- ViT-B/16 MLP→FP16：bs1 1.87 ms、bs32 吞吐 2367 img/s，Top1
-  85.034%，仅下降 0.070 个百分点。
-- Swin-Tiny v2：bs1 1.186 ms，bs32 6.056 ms，吞吐 5284 img/s，速度和精度都优于 v1，Top1 只下降 0.372%。
-
-因此，最新结论是：INT8 的速度潜力已经验证出来，但不同模型需要结合结构
-选择精度策略。ViT-B/16 适合将敏感 MLP 保留为 FP16，Swin-T 当前则可继续
-使用全量 INT8 v2。
-
-### 9.3 INT8 不理想的主要原因
-
-1. TensorRT build 方式是否有 FP16 fallback 非常关键。
-
-   INT8 v1 使用 `STRONGLY_TYPED`，没有显式开启 `--fp16 --int8`。这可能导致未量化算子以 FP32 执行，从而拖慢 engine。INT8 v2 改成 `FP16 + INT8` build 后，ViT 和 Swin 的速度明显提升。
-
-2. 非量化算子比例较高。
-
-   Transformer 模型有很多 LayerNorm、Softmax、Transpose、Reshape、Elementwise 等算子。这些算子即使主干 MatMul INT8，也会影响整体吞吐。
-
-3. TRT FP16 baseline 已经很强。
-
-   本次对比对象不是普通 PyTorch FP16，而是 TensorRT FP16。TRT FP16 已经做了大量 fusion 和 Tensor Core 优化，因此 INT8 想再大幅超过 FP16 并不容易。
-
-4. 校准策略仍偏基础。
-
-   默认 PTQ 使用 activation per-tensor max calibration。MobileNetV3 和 ViT 对 activation scale 非常敏感，需要更细粒度的校准、混合精度或 QAT。
-
-5. dynamic shape profile 可能不是最优。
-
-   当前 engine 支持动态 batch，例如 `min=1, opt=32, max=64`。实际测速 shape
-   与 opt shape 差异较大时，可能没有专用固定 shape engine 那么极致。
+- **精度优先、方案简单**：四个模型都可选择 TRT FP16。
+- **ViT-B/16**：优先 MLP→FP16 混合精度。
+- **Swin-T**：优先全量 INT8 v2。
+- **ResNet50**：当前优先 FP16；若允许约 1 个百分点下降，可考虑浅层混合。
+- **MobileNetV3-L**：优先 FP16；混合 INT8 精度合格，但吞吐仍比 FP16 低 3.8%。
 
 ## 10. 后续优化建议
 
-如果继续把 INT8 作为重点，可以按下面顺序推进：
-
-1. 对齐 `/optim` 的 TensorRT build 策略。
-   - 使用 Q/DQ ONNX。
-   - 用 weakly typed network + `BuilderFlag.FP16` + `BuilderFlag.INT8`。
-   - 或直接使用 ModelOpt `build_engine(..., trt_mode=TRTMode.INT8)`。
-   - 开 builder optimization level 4 或更高。
-   - 使用 timing cache。
-
-2. 重新构建 INT8 engine 后先只看速度。
-   - 如果速度恢复，说明主要问题是 build 配置。
-   - 如果速度仍慢，再做 layer profiling。
-
-3. 做 layerwise profiling。
-   - 看哪些层仍然是 FP32 / FP16。
-   - 看 Q/DQ 是否被融合。
-   - 看是否有大量 reformat / copy / transpose。
-
-4. 优化校准策略。
-   - MobileNetV3：重点处理 hard-swish、SE、depthwise conv 附近 activation。
-   - ViT：重点处理 MLP 层 activation scale。
-   - Swin：当前精度较健康，可以优先做速度优化。
-
-5. 混合精度策略。
-   - 将少数敏感层保留 FP16。
-   - 目标是在精度和速度之间找到 Pareto 最优点。
-
-6. 必要时考虑 QAT。
-   - 如果 PTQ 始终无法兼顾精度和速度，可以对 MobileNetV3 或 ViT 做量化感知训练。
+1. **补齐 CNN 自动 fallback 搜索**：复用类别均衡子集和 ModelOpt 通配规则，
+   输出每个候选组的精度、量化器数量和最终选择。
+2. **做 TensorRT layer profiling**：重点解释为何 ViT/Mobile 混合 engine
+   反而比全量 INT8 吞吐更高，并检查 reformat、copy 和未融合 Q/DQ。
+3. **ResNet50**：细分 stem、layer1、layer2，寻找比 `layer1+2` 更小的 FP16
+   集合；同时比较 percentile、MSE 和 cross-layer equalization。
+4. **MobileNetV3**：按 depthwise、SE、hard-swish 分组搜索；尝试 SmoothQuant
+   或其他 channel equalization。若仍需回退 blocks 0–5，则停止追求全量 INT8。
+5. **ViT**：尝试 SmoothQuant 缩小 MLP 的 FP16 范围，并跟踪 logit cosine。
+6. **必要时 QAT**：仅在部署约束明确要求 INT8、而 PTQ/混合精度仍不达标时使用。
 
 ## 11. 汇报时可以强调的结论
 
@@ -652,11 +631,12 @@ INT8 v1 结果不符合“比 FP16 快且准确率不低”的期待：
 
 ```text
 TensorRT FP16 是稳定可用的加速方案；
-INT8 使用了正确的 Q/DQ 方法，已经验证出明显速度潜力；
-ViT-B/16 通过 MLP→FP16 将精度损失压到 0.070 个百分点，同时保持 2.41x bs1 加速；
-后续重点是按模型结构寻找精度与速度的最佳混合方案。
+Swin-T 可直接使用全量 INT8 v2，吞吐是 FP16 的 1.33x；
+ViT-B/16 通过 MLP→FP16 将精度损失压到 0.070 个百分点；
+MobileNetV3 证明 depthwise+SE 结构不能盲目使用 per-tensor 全量 INT8；
+量化策略必须结合模型架构和实测敏感层，而不是统一套用一个配置。
 ```
 
-因此，当前工作可以作为“量化加速实验阶段完成”的结果；如果后续继续深入，
-则重点应放在其余模型的修正后复测、layer profiling、SmoothQuant 和更细粒度
-混合精度搜索上。
+因此，四模型的修正后基准、精度问题定位和第一轮混合精度优化已经完成。后续
+工作的重点不再是重复跑基准，而是补齐 CNN 自动搜索、做 layer profiling，并
+验证更小粒度的 ResNet/MobileNet 混合精度方案。
