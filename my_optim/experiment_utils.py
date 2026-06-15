@@ -2,7 +2,7 @@
 
 import random
 from collections import defaultdict
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Mapping, Sequence
 
 
 def class_balanced_indices(
@@ -58,3 +58,42 @@ def make_modelopt_exclusion_rules(fragments: Iterable[str]) -> Dict[str, dict]:
         rules[f"*{fragment}*weight_quantizer"] = {"enable": False}
         rules[f"*{fragment}*input_quantizer"] = {"enable": False}
     return rules
+
+
+def select_accuracy_constrained_candidate(
+        trials: Sequence[Mapping],
+        fp32_top1: float,
+        target_drop: float,
+) -> Mapping:
+    """Choose the smallest preset fallback that meets the accuracy constraint.
+
+    ``fallback_cost`` is an architecture-level estimate supplied by the search
+    script. If no candidate meets the target, return the highest-accuracy trial
+    so the experiment still produces a useful fallback.
+    """
+    if not trials:
+        raise ValueError("trials cannot be empty")
+    if target_drop < 0:
+        raise ValueError("target_drop cannot be negative")
+
+    acceptable = [
+        trial for trial in trials
+        if fp32_top1 - float(trial["top1"]) <= target_drop
+    ]
+    if acceptable:
+        return min(
+            acceptable,
+            key=lambda trial: (
+                int(trial["fallback_cost"]),
+                -float(trial["top1"]),
+                str(trial["name"]),
+            ),
+        )
+    return max(
+        trials,
+        key=lambda trial: (
+            float(trial["top1"]),
+            -int(trial["fallback_cost"]),
+            str(trial["name"]),
+        ),
+    )

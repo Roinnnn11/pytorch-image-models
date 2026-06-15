@@ -109,6 +109,41 @@ class QuantizationExperimentTests(unittest.TestCase):
         self.assertIn("--engine-suffix", source)
         self.assertIn("--result-tag", source)
 
+    def test_accuracy_constrained_search_prefers_smallest_acceptable_fallback(self):
+        utils = importlib.import_module("my_optim.experiment_utils")
+        trials = [
+            {"name": "full_int8", "top1": 60.0, "fallback_cost": 0},
+            {"name": "wide_fallback", "top1": 75.7, "fallback_cost": 6},
+            {"name": "small_fallback", "top1": 75.4, "fallback_cost": 2},
+        ]
+
+        selected = utils.select_accuracy_constrained_candidate(
+            trials,
+            fp32_top1=75.8,
+            target_drop=0.5,
+        )
+
+        self.assertEqual(selected["name"], "small_fallback")
+
+    def test_cnn_search_uses_architecture_aware_mobile_candidates(self):
+        source = _source("my_optim/run_sensitive_fallback.py")
+
+        self.assertIn("mobilenetv3_large_100", source)
+        self.assertIn('"conv_dw"', source)
+        self.assertIn('"se.conv_reduce"', source)
+        self.assertIn('"blocks.0"', source)
+        self.assertIn('"blocks.5"', source)
+        self.assertIn("class_balanced_indices", source)
+        self.assertIn("select_accuracy_constrained_candidate", source)
+        self.assertIn('"int8_qdq_search_selected_inline.onnx"', source)
+
+    def test_cnn_eval_can_load_search_engine_and_use_bs32_throughput(self):
+        source = _source("my_optim/run_trt_eval.py")
+
+        self.assertIn("--engine-suffix", source)
+        self.assertIn("--result-tag", source)
+        self.assertIn("--throughput-batch-size", source)
+
 
 if __name__ == "__main__":
     unittest.main()

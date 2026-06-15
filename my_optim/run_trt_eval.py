@@ -60,17 +60,32 @@ def main():
             "Omit for the default int8.engine."
         ),
     )
+    parser.add_argument(
+        "--engine-suffix",
+        default=None,
+        help="Override the model-prefixed engine suffix.",
+    )
+    parser.add_argument(
+        "--result-tag",
+        default=None,
+        help="Override the result JSON tag.",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--throughput-batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-batches", type=int, default=None)
     args = parser.parse_args()
 
-    if args.precision == "int8" and args.int8_variant:
-        tag = f"trt_int8_{args.int8_variant}"
+    if args.engine_suffix:
+        eng_p = common.engine_path(args.engine_suffix)
+        default_tag = f"trt_{args.precision}_custom"
+    elif args.precision == "int8" and args.int8_variant:
         eng_p = common.engine_path(f"int8_{args.int8_variant}.engine")
+        default_tag = f"trt_int8_{args.int8_variant}"
     else:
-        tag = f"trt_{args.precision}"
         eng_p = common.engine_path(f"{args.precision}.engine")
+        default_tag = f"trt_{args.precision}"
+    tag = args.result_tag or default_tag
 
     if not eng_p.exists():
         print(f"engine not found: {eng_p}")
@@ -86,7 +101,7 @@ def main():
 
     print(f"\n=== {tag} latency ===")
     latency = {}
-    for bs in (1, 64):
+    for bs in dict.fromkeys((1, args.throughput_batch_size)):
         latency[f"bs{bs}"] = common.measure_latency(infer, bs)
         print(f"bs={bs}: {latency[f'bs{bs}']['latency_ms_mean']:.3f} ms  "
               f"({latency[f'bs{bs}']['throughput_img_s']:.0f} img/s)")
