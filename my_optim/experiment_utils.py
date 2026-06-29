@@ -5,6 +5,64 @@ from collections import defaultdict
 from typing import Dict, Iterable, List, Mapping, Sequence
 
 
+def parse_fixed_batches(value: str) -> List[int]:
+    """Parse a unique, positive comma-separated batch-size list."""
+    try:
+        batches = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as error:
+        raise ValueError("batch sizes must be comma-separated integers") from error
+    if not batches or any(batch <= 0 for batch in batches):
+        raise ValueError("batch sizes must be positive")
+    if len(set(batches)) != len(batches):
+        raise ValueError("batch sizes must be unique")
+    return batches
+
+
+def padded_batch_size(actual: int, fixed: int) -> int:
+    """Validate that an actual batch can be padded to a fixed engine batch."""
+    if actual <= 0 or fixed <= 0 or actual > fixed:
+        raise ValueError("expected 0 < actual <= fixed")
+    return fixed
+
+
+def pareto_front(
+        trials: Sequence[Mapping],
+        fp32_top1: float,
+        max_drop: float,
+) -> List[Mapping]:
+    """Return accuracy-eligible, non-dominated latency/throughput trials."""
+    if max_drop < 0:
+        raise ValueError("max_drop cannot be negative")
+    eligible = [
+        trial for trial in trials
+        if fp32_top1 - float(trial["top1"]) <= max_drop
+    ]
+    front = []
+    for candidate in eligible:
+        dominated = any(
+            other is not candidate
+            and float(other["top1"]) >= float(candidate["top1"])
+            and float(other["latency_ms"]) <= float(candidate["latency_ms"])
+            and float(other["throughput"]) >= float(candidate["throughput"])
+            and (
+                float(other["top1"]) > float(candidate["top1"])
+                or float(other["latency_ms"]) < float(candidate["latency_ms"])
+                or float(other["throughput"]) > float(candidate["throughput"])
+            )
+            for other in eligible
+        )
+        if not dominated:
+            front.append(candidate)
+    return sorted(
+        front,
+        key=lambda trial: (
+            -float(trial["top1"]),
+            float(trial["latency_ms"]),
+            str(trial["name"]),
+        ),
+    )
+
+
 def class_balanced_indices(
         targets: Sequence[int],
         sample_size: int,

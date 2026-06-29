@@ -33,6 +33,38 @@ def _method_source(path: str, class_name: str, method_name: str) -> str:
 
 
 class QuantizationExperimentTests(unittest.TestCase):
+    def test_parse_fixed_batches_rejects_duplicates_and_non_positive_values(self):
+        utils = importlib.import_module("my_optim.experiment_utils")
+
+        self.assertEqual(utils.parse_fixed_batches("1,4,16,32"), [1, 4, 16, 32])
+        for value in ("", "1,1", "0,4", "1,-4", "1,nope"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    utils.parse_fixed_batches(value)
+
+    def test_padded_batch_size_validates_fixed_engine_capacity(self):
+        utils = importlib.import_module("my_optim.experiment_utils")
+
+        self.assertEqual(utils.padded_batch_size(17, 32), 32)
+        self.assertEqual(utils.padded_batch_size(32, 32), 32)
+        for actual, fixed in ((0, 32), (33, 32), (1, 0)):
+            with self.subTest(actual=actual, fixed=fixed):
+                with self.assertRaises(ValueError):
+                    utils.padded_batch_size(actual, fixed)
+
+    def test_pareto_front_filters_accuracy_and_dominated_trials(self):
+        utils = importlib.import_module("my_optim.experiment_utils")
+        trials = [
+            {"name": "fast", "top1": 84.0, "latency_ms": 1.0, "throughput": 3000},
+            {"name": "dominated", "top1": 83.5, "latency_ms": 1.2, "throughput": 2500},
+            {"name": "accurate", "top1": 85.0, "latency_ms": 1.5, "throughput": 2700},
+            {"name": "ineligible", "top1": 82.0, "latency_ms": 0.8, "throughput": 4000},
+        ]
+
+        front = utils.pareto_front(trials, fp32_top1=85.1, max_drop=2.0)
+
+        self.assertEqual([trial["name"] for trial in front], ["accurate", "fast"])
+
     def test_class_balanced_indices_are_deterministic_and_balanced(self):
         utils = importlib.import_module("my_optim.experiment_utils")
         targets = [0] * 5 + [1] * 5 + [2] * 5 + [3] * 5
@@ -108,6 +140,43 @@ class QuantizationExperimentTests(unittest.TestCase):
 
         self.assertIn("--engine-suffix", source)
         self.assertIn("--result-tag", source)
+
+    def test_vit_ptq_exports_named_calibration_candidates(self):
+        source = _source("my_optim_Trans/run_ptq_int8.py")
+
+        self.assertIn('choices=["max", "mse", "smoothquant"]', source)
+        self.assertIn("--smoothquant-alpha", source)
+        self.assertIn('"method": "smoothquant"', source)
+        self.assertIn('f"int8_qdq_{candidate}"', source)
+
+    def test_transformer_builder_supports_fixed_min_opt_max_profile(self):
+        source = _source("my_optim_Trans/build_trt_engine.py")
+
+        self.assertIn("--fixed-bs", source)
+        self.assertIn("min_bs = opt_bs = max_bs = fixed_bs", source)
+        self.assertIn('"fixed_batch_size"', source)
+
+    def test_transformer_eval_reuses_outputs_and_pads_fixed_final_batch(self):
+        source = _source("my_optim_Trans/run_trt_eval.py")
+
+        self.assertIn("self._output_cache", source)
+        self.assertIn("--fixed-bs", source)
+        self.assertIn("pad_fixed_batch", source)
+        self.assertIn('"e2e_throughput_img_s"', source)
+        self.assertIn('"evaluated_samples"', source)
+
+    def test_vit_int8_matrix_covers_candidates_batches_and_resume(self):
+        source = _source("my_optim_Trans/run_vit_int8_matrix.py")
+
+        for token in ("max", "mse", "0.3", "0.5", "0.7", "0.9"):
+            self.assertIn(token, source)
+        self.assertIn('DEFAULT_BATCHES = "1,4,16,32"', source)
+        self.assertIn("--max-top1-drop", source)
+        self.assertIn("--dry-run", source)
+        self.assertIn("--force", source)
+        self.assertIn("pareto_front", source)
+        self.assertIn("scale_search", source)
+        self.assertIn("mlp_fallback", source)
 
     def test_accuracy_constrained_search_prefers_smallest_acceptable_fallback(self):
         utils = importlib.import_module("my_optim.experiment_utils")

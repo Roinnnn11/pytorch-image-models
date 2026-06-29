@@ -36,6 +36,7 @@ Builder quality:
   Persistent timing cache at engines/timing.cache, shared across builds.
 """
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -76,6 +77,7 @@ def build_engine(
     precision: str,
     opt_bs: int = 32,
     max_bs: int = 64,
+    fixed_bs: int = None,
 ) -> None:
     _, h, w = common.INPUT_SIZE
 
@@ -101,15 +103,23 @@ def build_engine(
 
     config = builder.create_builder_config()
 
-    # Profile tuned to actual eval batch size so selected kernels are optimal
-    # for the measurement point, not some smaller opt value.
+    if fixed_bs is not None:
+        if fixed_bs <= 0:
+            raise ValueError("fixed_bs must be positive")
+        min_bs = opt_bs = max_bs = fixed_bs
+    else:
+        min_bs = 1
+        if not min_bs <= opt_bs <= max_bs:
+            raise ValueError("expected 1 <= opt_bs <= max_bs")
+
+    # A fixed MIN=OPT=MAX profile unlocks tactics that dynamic profiles disable.
     profile = builder.create_optimization_profile()
     profile.set_shape("input",
-                      min=(1, 3, h, w),
+                      min=(min_bs, 3, h, w),
                       opt=(opt_bs, 3, h, w),
                       max=(max_bs, 3, h, w))
     config.add_optimization_profile(profile)
-    print(f"opt profile: min=1, opt={opt_bs}, max={max_bs}")
+    print(f"opt profile: min={min_bs}, opt={opt_bs}, max={max_bs}")
 
     if precision == "fp16":
         if not builder.platform_has_fast_fp16:
@@ -146,6 +156,22 @@ def build_engine(
 
     engine_path.parent.mkdir(parents=True, exist_ok=True)
     engine_path.write_bytes(serialized)
+    metadata = {
+        "model": common.MODEL_NAME,
+        "precision": precision,
+        "onnx": str(onnx_path),
+        "engine": str(engine_path),
+        "fixed_batch_size": fixed_bs,
+        "profile": {"min": min_bs, "opt": opt_bs, "max": max_bs},
+        "tensorrt_version": trt.__version__,
+        "gpu": common.gpu_name(),
+        "builder_optimization_level": 5,
+        "avg_timing_iterations": 8,
+    }
+    engine_path.with_suffix(engine_path.suffix + ".json").write_text(
+        json.dumps(metadata, indent=2),
+        encoding="utf-8",
+    )
     print(f"engine saved: {engine_path} ({engine_path.stat().st_size/1e6:.1f} MB)")
 
 
@@ -166,13 +192,19 @@ def main() -> None:
                         help="Optimization profile opt batch size (default=32)")
     parser.add_argument("--max-bs", type=int, default=64,
                         help="Optimization profile max batch size (default=64)")
+    parser.add_argument(
+        "--fixed-bs",
+        type=int,
+        default=None,
+        help="Build a fixed MIN=OPT=MAX batch profile (recommended for benchmarks).",
+    )
     args = parser.parse_args()
 
     if args.precision == "fp16":
         onnx_suffix   = args.onnx_suffix   or "fp32_dynbatch_inline.onnx"
         engine_suffix = args.engine_suffix or "fp16.engine"
     else:
-        onnx_suffix   = args.onnx_suffix   or "int8_qdq_inline.onnx"
+        onnx_suffix   = args.onnx_suffix   or "int8_qdq_max_inline.onnx"
         engine_suffix = args.engine_suffix or "int8.engine"
 
     onnx_p = common.onnx_path(onnx_suffix)
@@ -183,7 +215,7 @@ def main() -> None:
         sys.exit(1)
 
     build_engine(onnx_p, eng_p, args.precision,
-                 opt_bs=args.opt_bs, max_bs=args.max_bs)
+                 opt_bs=args.opt_bs, max_bs=args.max_bs, fixed_bs=args.fixed_bs)
 
 
 if __name__ == "__main__":
